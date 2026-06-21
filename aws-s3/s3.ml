@@ -85,6 +85,8 @@ module Protocol(P: sig type 'a result end) = struct
     last_modified: time [@key "LastModified"];
     key: string [@key "Key"];
     etag: etag [@key "ETag"];
+    content_type: string option; [@default None]
+    response_headers: (string * string) list; [@default []]
     meta_headers: (string * string) list option; [@default None]
     (** Add expiration date option *)
   } [@@deriving of_protocol ~driver:(module Protocol_conv_xmlm.Xmlm)]
@@ -371,6 +373,7 @@ module Make(Io : Types.Io) = struct
       Aws.make_request ?credentials ?connect_timeout_ms ~endpoint ~headers ~meth:`HEAD ~path ~query:[] ~sink ()
     in
     do_command ~endpoint cmd >>=? fun headers ->
+    let response_headers = Headers.bindings headers in
     let result =
       let (>>=) a f = match a with
         | Some x -> f x
@@ -380,6 +383,7 @@ module Make(Io : Types.Io) = struct
       Headers.find_opt "etag" headers >>= fun etag ->
       Headers.find_opt "last-modified" headers >>= fun last_modified ->
       let meta_headers = Headers.find_prefix ~prefix:"x-amz-meta-" headers in
+      let content_type = Headers.find_opt "content-type" headers in
       let last_modified = Time.parse_rcf1123_string last_modified in
       let size = size |> int_of_string in
       let storage_class =
@@ -388,7 +392,8 @@ module Make(Io : Types.Io) = struct
             storage_class_of_xmlm_exn (make_xmlm_node "p" [] [`Data s])
         )
       in
-      Some { storage_class; size; last_modified; key; etag = unquote etag; meta_headers = Some meta_headers}
+      Some { storage_class; size; last_modified; key; etag = unquote etag;
+             content_type; response_headers; meta_headers = Some meta_headers }
     in
     match result with
     | Some r -> Deferred.return (Ok r)
@@ -692,6 +697,30 @@ let%test "parse Error_response.t" =
   let xml = xmlm_of_string data in
   let error = Protocol.Error_response.of_xmlm_exn xml in
   "PermanentRedirect" = error.Protocol.Error_response.code
+
+let%test "content_type defaults to None in XML-parsed content" =
+  let module Protocol = Protocol(struct type 'a result = 'a end) in
+  let data = {|
+      <ListBucketResult>
+        <Name>s3_osd</Name>
+        <Prefix></Prefix>
+        <KeyCount>1</KeyCount>
+        <MaxKeys>1000</MaxKeys>
+        <IsTruncated>false</IsTruncated>
+        <Contents>
+          <StorageClass>STANDARD</StorageClass>
+          <Key>test</Key>
+          <LastModified>2018-02-27T13:39:35.000Z</LastModified>
+          <ETag>"7538d2bd85ea5dfb689ed65a0f60a7aa"</ETag>
+          <Size>20</Size>
+        </Contents>
+      </ListBucketResult>
+      |}
+  in
+  let xml = xmlm_of_string data in
+  let result = Protocol.Ls.result_of_xmlm_exn xml in
+  let c = List.hd result.Protocol.Ls.contents in
+  c.Protocol.content_type = None && c.Protocol.response_headers = []
 
 let%test "parse Delete_multi.result" =
   let module Protocol = Protocol(struct type 'a result = 'a end) in

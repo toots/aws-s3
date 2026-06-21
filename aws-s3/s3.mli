@@ -33,8 +33,9 @@ module Make(Io : Types.Io) : sig
     last_modified : float; (** Seconds since epoch *)
     key : string;
     etag : etag; (** Etag as a string. this us usually the MD5, unless the object was constructed by multi-upload *)
+    content_type : string option; (** Content-Type header, populated by [head] only. *)
+    response_headers : (string * string) list; (** Full response headers, populated by [head] only. *)
     meta_headers: (string * string) list option; (** Meta headers. If None, the information was not retrieved. *)
-
   }
 
   type nonrec 'a result = ('a, error) result Deferred.t
