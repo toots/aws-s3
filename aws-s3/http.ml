@@ -51,7 +51,7 @@ module Make(Io : Types.Io) = struct
     in
     let path_with_params =
       let query = List.map ~f:(fun (k, v) -> k, [v]) query in
-      Uri.make ~path ~query () |> Uri.to_string
+      Uri.make ~path:(Util.encode_string path) ~query () |> Uri.to_string
     in
     let header = sprintf "%s %s HTTP/1.1\r\n" (string_of_method meth) path_with_params in
     Pipe.write writer header >>= fun () ->
