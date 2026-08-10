@@ -94,6 +94,12 @@ module Make(Io : Types.Io) : sig
       UNSIGNED-PAYLOAD instead of the sha256 of [data], which saves a full pass
       over the body but leaves the payload out of the signature, so it should
       only be used over https.
+      @param precondition Makes the write conditional, so that s3 answers 412
+      instead of replacing the object when it does not hold. [`If_none_match]
+      writes only if the key is free, which is how several writers can race for
+      one name and have exactly one win; [`If_match etag] writes only if the
+      object still carries that etag.
+      @see https://docs.aws.amazon.com/AmazonS3/latest/userguide/conditional-writes.html
   *)
   val put :
     (?unsigned_payload:bool ->
@@ -102,6 +108,7 @@ module Make(Io : Types.Io) : sig
      ?acl:string ->
      ?cache_control:string ->
      ?expect:bool ->
+     ?precondition:[ `If_none_match | `If_match of string ] ->
      ?meta_headers:(string * string) list ->
      bucket:string ->
      key:string ->
@@ -171,6 +178,7 @@ module Make(Io : Types.Io) : sig
        ?acl:string ->
        ?cache_control:string ->
        ?expect:bool ->
+       ?precondition:[ `If_none_match | `If_match of string ] ->
        ?meta_headers:(string * string) list ->
        bucket:string ->
        key:string ->
