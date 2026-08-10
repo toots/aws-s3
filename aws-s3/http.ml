@@ -178,13 +178,107 @@ module Make(Io : Types.Io) = struct
     Or_error.return (code, message, headers, error_body)
 
 
-  let call ?(expect=false) ?connect_timeout_ms ~(endpoint:Region.endpoint) ~path ?(query=[]) ~headers ~sink ?body (meth:meth) =
-    Net.connect ?connect_timeout_ms ~inet:endpoint.inet ~host:endpoint.host ~port:endpoint.port ~scheme:endpoint.scheme () >>=? fun (reader, writer) ->
-    (* At this point we need to make sure reader and writer are closed properly. *)
-    do_request ~expect ~path ~query ~headers ~sink ?body meth reader writer >>= fun result ->
-    (* Close the reader and writer regardless of status *)
+  (* Idle connections to the same (scheme, host, port) are kept open and reused,
+     saving a TCP + TLS handshake per request. Each entry carries the time it
+     was returned to the pool. *)
+  let pool : (string, ((string Pipe.reader * string Pipe.writer) * float) Queue.t) Hashtbl.t =
+    Hashtbl.create 8
+
+  let max_idle_per_host = 32
+
+  (* Servers reap idle keep-alive connections on their own schedule (Backblaze
+     B2 aggressively so), and handing out one the peer has already closed costs
+     a failed request, so how long an entry may sit here is peer-dependent. *)
+  let max_idle_age_s =
+    match Sys.getenv_opt "AWS_S3_POOL_MAX_IDLE_S" with
+    | Some s -> (try float_of_string s with _ -> 20.)
+    | None -> 20.
+
+  let pool_key (endpoint : Region.endpoint) =
+    let scheme = match endpoint.scheme with `Http -> "http" | `Https -> "https" in
+    sprintf "%s:%s:%d" scheme endpoint.host endpoint.port
+
+  let pool_queue key =
+    match Hashtbl.find_opt pool key with
+    | Some q -> q
+    | None -> let q = Queue.create () in Hashtbl.replace pool key q; q
+
+  (* Closing the reader cascades to the socket close, see [Net.connect]. *)
+  let discard_conn (reader, writer) =
     Pipe.close writer;
-    Pipe.close_reader reader;
-    Pipe.close sink;
-    return result
+    Pipe.close_reader reader
+
+  let rec take_idle key =
+    match Queue.take_opt (pool_queue key) with
+    | None -> None
+    | Some (((reader, writer) as conn), idle_since) ->
+      let stale =
+        Pipe.is_closed reader || Pipe.is_closed writer
+        || Unix.gettimeofday () -. idle_since > max_idle_age_s
+      in
+      match stale with
+      | true -> discard_conn conn; take_idle key
+      | false -> Some conn
+
+  let return_idle key conn =
+    let q = pool_queue key in
+    match Queue.length q >= max_idle_per_host with
+    | true -> discard_conn conn
+    | false -> Queue.add (conn, Unix.gettimeofday ()) q
+
+  let get_connection ?connect_timeout_ms (endpoint : Region.endpoint) =
+    match take_idle (pool_key endpoint) with
+    | Some conn -> Deferred.Or_error.return (`Reused conn)
+    | None ->
+      Net.connect ?connect_timeout_ms ~inet:endpoint.inet ~host:endpoint.host
+        ~port:endpoint.port ~scheme:endpoint.scheme ()
+      >>=? fun conn -> Deferred.Or_error.return (`Fresh conn)
+
+  (* Reuse requires that the whole response body was consumed, which only holds
+     when the response was framed by Content-Length or chunked transfer-encoding
+     (HEAD carries no body); otherwise leftover bytes corrupt the next request. *)
+  let response_keeps_alive ~meth ~headers =
+    let connection_close =
+      match Headers.find_opt "connection" headers with
+      | Some v ->
+        String.split_on_char ~sep:',' v
+        |> List.exists ~f:(fun t -> String.lowercase_ascii (String.trim t) = "close")
+      | None -> false
+    in
+    let framed =
+      meth = `HEAD
+      || Headers.find_opt "content-length" headers <> None
+      || Headers.find_opt "transfer-encoding" headers <> None
+    in
+    (not connection_close) && framed
+
+  let call ?(expect=false) ?connect_timeout_ms ~(endpoint:Region.endpoint) ~path ?(query=[]) ~headers ~sink ?body (meth:meth) =
+    let key = pool_key endpoint in
+    let run (reader, writer) =
+      do_request ~expect ~path ~query ~headers ~sink ?body meth reader writer
+    in
+    let finish conn result =
+      (match result with
+       | Ok (_, _, resp_headers, _) when response_keeps_alive ~meth ~headers:resp_headers ->
+         return_idle key conn
+       | _ -> discard_conn conn);
+      Pipe.close sink;
+      return result
+    in
+    get_connection ?connect_timeout_ms endpoint >>=? fun tagged ->
+    let conn = match tagged with `Fresh c | `Reused c -> c in
+    let reused = match tagged with `Reused _ -> true | `Fresh _ -> false in
+    run conn >>= fun result ->
+    (* A pooled socket may have been dropped by the peer while idle, so a
+       failure on a reused connection is retried once on a fresh one -- only
+       without a body, which the first attempt consumed and this layer cannot
+       replay (PUT relies on the caller's retry, which can rebuild it). *)
+    match result with
+    | Error _ when reused && body = None ->
+      discard_conn conn;
+      Net.connect ?connect_timeout_ms ~inet:endpoint.inet ~host:endpoint.host
+        ~port:endpoint.port ~scheme:endpoint.scheme () >>= (function
+        | Ok conn -> run conn >>= fun result -> finish conn result
+        | Error _ as err -> Pipe.close sink; return err)
+    | _ -> finish conn result
 end

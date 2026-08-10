@@ -7,7 +7,8 @@
     it is strongly recommended that you use https.
     To use https, make sure to have the relevant opam packages installed:
     [async_ssl] for [async] and [lwt_ssl]/[tls] for [lwt].
-    Please note that connections are not reused due to a limitation on the AWS endpoint.
+    Connections are kept alive and reused across requests to the same
+    (scheme, host, port) endpoint (HTTP/1.1 persistent connections).
 
 
     If no credentials is provided, the requests will not be signed,
