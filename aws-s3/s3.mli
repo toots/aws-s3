@@ -101,6 +101,22 @@ module Make(Io : Types.Io) : sig
      key:string ->
      data:string -> unit -> etag result) command
 
+  (** {!put} with a body that is never held on the OCaml heap.
+
+      [data] is read for the duration of the request rather than copied up
+      front, so its bytes must stay valid until the result is determined.
+  *)
+  val put_bigstring :
+    (?content_type:string ->
+     ?content_encoding:string ->
+     ?acl:string ->
+     ?cache_control:string ->
+     ?expect:bool ->
+     ?meta_headers:(string * string) list ->
+     bucket:string ->
+     key:string ->
+     data:Bigstringaf.t -> unit -> etag result) command
+
   (** Download [key] from s3 in [bucket]
       If [range] is specified, only a part of the file is retrieved:
       - If [first] is None, then start from the beginning of the object.
@@ -108,6 +124,10 @@ module Make(Io : Types.Io) : sig
   *)
   val get :
     (?range:range -> bucket:string -> key:string -> unit -> string result) command
+
+  (** {!get} answering off the OCaml heap. *)
+  val get_bigstring :
+    (?range:range -> bucket:string -> key:string -> unit -> Bigstringaf.t result) command
 
   (** Call head on the object to retrieve info on a single object *)
   val head :
@@ -222,6 +242,16 @@ module Make(Io : Types.Io) : sig
        part_number:int ->
        ?expect:bool ->
        data:string ->
+       unit ->
+       etag result) command
+
+    (** {!upload_part} with a body that is never held on the OCaml heap, under
+        the same ownership rule as {!Aws_s3.S3.Make.put_bigstring}. *)
+    val upload_part_bigstring :
+      (t ->
+       part_number:int ->
+       ?expect:bool ->
+       data:Bigstringaf.t ->
        unit ->
        etag result) command
 

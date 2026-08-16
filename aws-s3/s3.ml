@@ -238,6 +238,10 @@ module Make(Io : Types.Io) = struct
     let reader, writer = Pipe.create () in
     Body.to_string reader, writer
 
+  let bigstring_sink () =
+    let reader, writer = Pipe.create () in
+    Body.to_bigstring reader, writer
+
   include Protocol(struct type nonrec 'a result = ('a, error) result Deferred.t end)
 
   type range = { first: int option; last: int option }
@@ -357,8 +361,18 @@ module Make(Io : Types.Io) = struct
     let body = Body.String data in
     put_common ?credentials ?connect_timeout_ms ?confirm_requester_pays ?content_type ?content_encoding ?acl ?cache_control ?expect ?meta_headers ~endpoint ~bucket ~key ~body ()
 
+  let put_bigstring ?credentials ?connect_timeout_ms ?confirm_requester_pays ~endpoint ?content_type ?content_encoding ?acl ?cache_control ?expect ?meta_headers ~bucket ~key ~data () =
+    let body = Body.Bigstring data in
+    put_common ?credentials ?connect_timeout_ms ?confirm_requester_pays ?content_type ?content_encoding ?acl ?cache_control ?expect ?meta_headers ~endpoint ~bucket ~key ~body ()
+
   let get ?credentials ?connect_timeout_ms ?confirm_requester_pays ~endpoint ?range ~bucket ~key () =
     let body, data = string_sink () in
+    Stream.get ?credentials ?connect_timeout_ms ?confirm_requester_pays ~endpoint ?range ~bucket ~key ~data () >>=? fun () ->
+    body >>= fun body ->
+    Deferred.return (Ok body)
+
+  let get_bigstring ?credentials ?connect_timeout_ms ?confirm_requester_pays ~endpoint ?range ~bucket ~key () =
+    let body, data = bigstring_sink () in
     Stream.get ?credentials ?connect_timeout_ms ?confirm_requester_pays ~endpoint ?range ~bucket ~key ~data () >>=? fun () ->
     body >>= fun body ->
     Deferred.return (Ok body)
@@ -513,7 +527,7 @@ module Make(Io : Types.Io) = struct
         [part_number] specifies the part numer. Parts will be assembled in order, but
         does not have to be consecutive
     *)
-    let upload_part ?credentials ?connect_timeout_ms ?(confirm_requester_pays=false) ~endpoint t ~part_number ?expect ~data () =
+    let upload_part_common ?credentials ?connect_timeout_ms ?(confirm_requester_pays=false) ~endpoint t ~part_number ?expect ~body () =
       let path = sprintf "/%s/%s" t.bucket t.key in
       let query =
         [ "partNumber", string_of_int part_number;
@@ -523,7 +537,7 @@ module Make(Io : Types.Io) = struct
       let headers = maybe_add_request_payer confirm_requester_pays [] in
       let cmd () =
         Aws.make_request ?expect ?credentials ?connect_timeout_ms ~endpoint ~headers ~meth:`PUT ~path
-          ~body:(Body.String data) ~query ~sink ()
+          ~body ~query ~sink ()
       in
       do_command ~endpoint cmd >>=? fun headers ->
       let etag =
@@ -533,6 +547,12 @@ module Make(Io : Types.Io) = struct
       in
       t.parts <- { etag; part_number } :: t.parts;
       Deferred.return (Ok etag)
+
+    let upload_part ?credentials ?connect_timeout_ms ?confirm_requester_pays ~endpoint t ~part_number ?expect ~data () =
+      upload_part_common ?credentials ?connect_timeout_ms ?confirm_requester_pays ~endpoint t ~part_number ?expect ~body:(Body.String data) ()
+
+    let upload_part_bigstring ?credentials ?connect_timeout_ms ?confirm_requester_pays ~endpoint t ~part_number ?expect ~data () =
+      upload_part_common ?credentials ?connect_timeout_ms ?confirm_requester_pays ~endpoint t ~part_number ?expect ~body:(Body.Bigstring data) ()
 
     (** Specify a part to be a file on s3.
         [range] can be used to only include a part of the s3 file
