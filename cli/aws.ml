@@ -57,14 +57,26 @@ module Make(Io : Aws_s3.Types.Io) = struct
     Io.Deferred.async (Io.Pipe.closed reader >>= fun () -> close_in ic; return ());
     reader
 
+  (* Block at a time through one reusable buffer: a [Bytes] the size of the file
+     would put the whole body on the heap, which is what the bigstring is here
+     to avoid. *)
   let read_file_bigstring ~pos ~len file =
+    let block = 65536 in
     let ic = open_in_bin file in
     seek_in ic pos;
-    let bytes = Bytes.create len in
-    really_input ic bytes 0 len;
-    close_in ic;
     let data = Bigstringaf.create len in
-    Bigstringaf.blit_from_bytes bytes ~src_off:0 data ~dst_off:0 ~len;
+    let buffer = Bytes.create (min block len) in
+    let rec read offset =
+      match len - offset with
+      | 0 -> ()
+      | remain ->
+        let n = min block remain in
+        really_input ic buffer 0 n;
+        Bigstringaf.blit_from_bytes buffer ~src_off:0 data ~dst_off:offset ~len:n;
+        read (offset + n)
+    in
+    read 0;
+    close_in ic;
     data
 
   let save_file file contents =
@@ -73,10 +85,20 @@ module Make(Io : Aws_s3.Types.Io) = struct
     close_out oc
 
   let save_file_bigstring file contents =
+    let block = 65536 in
+    let len = Bigstringaf.length contents in
     let oc = open_out_bin file in
-    let bytes = Bytes.create (Bigstringaf.length contents) in
-    Bigstringaf.blit_to_bytes contents ~src_off:0 bytes ~dst_off:0 ~len:(Bytes.length bytes);
-    output_bytes oc bytes;
+    let buffer = Bytes.create (min block len) in
+    let rec write offset =
+      match len - offset with
+      | 0 -> ()
+      | remain ->
+        let n = min block remain in
+        Bigstringaf.blit_to_bytes contents ~src_off:offset buffer ~dst_off:0 ~len:n;
+        output oc buffer 0 n;
+        write (offset + n)
+    in
+    write 0;
     close_out oc
 
   type objekt = { bucket: string; key: string }
