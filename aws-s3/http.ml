@@ -263,6 +263,8 @@ module Make(Io : Types.Io) = struct
          return_idle key conn
        | _ -> discard_conn conn);
       Pipe.close sink;
+      (* A body the request never got to send still has a producer behind it. *)
+      (match body with Some body -> Pipe.close_reader body | None -> ());
       return result
     in
     get_connection ?connect_timeout_ms endpoint >>=? fun tagged ->
